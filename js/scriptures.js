@@ -16,34 +16,61 @@ const Scriptures = (function() {
      *                      CONSTANTS
      */
 
+    const apiUrl = `https://scriptures.byu.edu/mapscrip/mapgetscrip.php`
+    const LAT_LON_PARSER = /\((.*),'(.*)',(.*),(.*),(.*),(.*),(.*),(.*),(.*),(.*),'(.*)'\)/
+    const index = {
+        placename: 2,
+        lat: 3,
+        long: 4,
+        flag: 11
+    }
+    const MAX_RETRY_DELAY = 5000
+
     /*------------------------------------------------------------------------
      *                      PRIVATE VARIABLES
      */
     let books
     let volumes
+    let retryDelay = 500
+    let markers = []
 
     /*------------------------------------------------------------------------
      *                      PRIVATE METHOD DECLARATIONS
      */
     let ajax
+    let addMarker
+    let bookChapterValid
     let cacheBooks
+    let chapterFailure
+    let chapterSuccess
+    let clearMarkers
+    let clearAndHideButton
+    let encodedScripturesURL
     let init
-    let navigateHome
-    let navigateChapter
     let navigateBook
+    let navigateChapter
+    let navigateHome
+    let nextChapter
     let onHashChanged
+    let previousChapter
+    let setupMarkers
+    let titleForBookChapter
 
     /*------------------------------------------------------------------------
      *                      PRIVATE METHODS
      */
-    ajax = function(url, successCallback, failureCallback) {
+    ajax = function(url, successCallback, failureCallback, skipParse = false) {
         let request = new XMLHttpRequest()
 
         request.open("GET", url, true)
 
         request.onload = function() {
             if (request.status >= 200 && request.status < 400) {
-                let data = JSON.parse(request.responseText)
+                let data = request.responseText
+
+                if (!skipParse) {
+                    data = JSON.parse(data)
+                }
 
                 if (typeof successCallback === "function") {
                     successCallback(data)
@@ -118,6 +145,170 @@ const Scriptures = (function() {
         document.getElementById("scriptures").innerHTML = navContents
     }
 
+    navigateBook = function(bookId) {
+        let book = books[bookId]
+
+        let chapterCount = book.numChapters
+
+        if (chapterCount === 0) {
+            return navigateChapter(bookId, 0)
+        }
+        if (chapterCount === 1) {
+            return navigateChapter(bookId, 1)
+        }
+
+        let navContents = `<div id="scripnav">`
+
+        navContents += `<div class="volume">`
+        navContents += `<h5>${book.fullName}</h5></div>`
+        navContents += `<div class="books">`
+        for (const chapter of Array(chapterCount).keys()) {
+            let chapterName = `${chapter + 1}`
+            navContents += `<a class="btn chapter" id="${chapterName}" `
+            navContents += `href="#0:${book.id}:${chapterName}">${chapterName}`
+            navContents += `</a>`
+        }
+
+        navContents += `</div></div>`
+        document.getElementById("scriptures").innerHTML = navContents
+    }
+
+    chapterFailure = function() {
+        console.log("Error getting Scripture Content from API")
+    }
+
+    chapterSuccess = function(chapterHTML) {
+        document.getElementById("scriptures").innerHTML = chapterHTML
+        setupMarkers()
+    }
+
+    encodedScripturesURL = function(bookId, chapter, verses, isJST) {
+        if (bookId !== undefined && chapter !== undefined) {
+            let options = ""
+
+            if (verses !== undefined) {
+                options += verses
+            }
+
+            if (isJST !== undefined && isJST) {
+                options += `&jst=JST`
+            }
+
+            return `${apiUrl}?book=${bookId}&chap=${chapter}&verses=${options}`
+        }
+    }
+
+    navigateChapter = function(bookId, chapterId) {
+        if (bookId !== undefined) {
+            let book = books[bookId]
+            let volume = volumes[book.parentBookId - 1]
+
+            ajax(
+                encodedScripturesURL(bookId, chapterId),
+                chapterSuccess,
+                chapterFailure,
+                true
+            )
+
+            // Update Next and previous
+
+            let nextChapterDetails = nextChapter(bookId, chapterId)
+            let prevChapterDetails = previousChapter(bookId, chapterId)
+
+            let button = document.getElementById("nextButton")
+            if (nextChapterDetails) {
+                button.href = `#0:${nextChapterDetails[0]}:${nextChapterDetails[1]}`
+                button.title = nextChapterDetails[2]
+                button.style.visibility = "visible"
+            } else {
+                clearAndHideButton(button)
+            }
+
+            button = document.getElementById("previousButton")
+            if (prevChapterDetails) {
+                button.href = `#0:${prevChapterDetails[0]}:${prevChapterDetails[1]}`
+                button.title = prevChapterDetails[2]
+                button.style.visibility = "visible"
+            } else {
+                clearAndHideButton(button)
+            }
+        }
+    }
+
+    clearAndHideButton = function(button) {
+        button.href = `#`
+        button.title = ""
+        button.style.visibility = "hidden"
+    }
+
+    bookChapterValid = function(bookId, chapter) {
+        let book = books[bookId]
+
+        if (book === undefined || chapter < 0 || chapter > book.numChapters) {
+            return false
+        }
+
+        if (book.numChapters > 0 && chapter == 0) {
+            return false
+        }
+
+        return true
+    }
+
+    nextChapter = function(bookId, chapter) {
+        let book = books[bookId]
+        if (book !== undefined) {
+            if (chapter < book.numChapters) {
+                return [book.id, chapter + 1, titleForBookChapter(book, chapter + 1)]
+            }
+
+            let nextBook = books[bookId + 1]
+
+            if (nextBook) {
+                let nextChapter = 0
+                if (nextBook.numChapters > 0) {
+                    nextChapter = 1
+                }
+                return [
+                    nextBook.id,
+                    nextChapter,
+                    titleForBookChapter(nextBook, nextChapter)
+                ]
+            }
+        }
+    }
+
+    previousChapter = function(bookId, chapter) {
+        let book = books[bookId]
+        if (book !== undefined) {
+            if (chapter > 1 && chapter <= book.numChapters) {
+                return [book.id, chapter - 1, titleForBookChapter(book, chapter - 1)]
+            }
+
+            let previousBook = books[bookId - 1]
+
+            if (previousBook) {
+                let nextChapter = previousBook.numChapters
+                if (previousBook.numChapters === 0) {
+                    nextChapter = 0
+                }
+                return [
+                    previousBook.id,
+                    nextChapter,
+                    titleForBookChapter(previousBook, nextChapter)
+                ]
+            }
+        }
+    }
+
+    titleForBookChapter = function(book, chapter) {
+        if (chapter > 0) {
+            return book.tocName + " " + chapter
+        }
+
+        return book.tocName
+    }
+
     onHashChanged = function() {
         let ids = []
 
@@ -135,29 +326,106 @@ const Scriptures = (function() {
             } else {
                 navigateHome(volumeId)
             }
-        } else if (ids.length === 2) {
+        } else if (ids.length >= 2) {
             let bookId = Number(ids[1])
-
             if (books[bookId] === undefined) {
                 navigateHome()
             } else {
-                navigateBook(bookId)
+                if (ids.length === 2) {
+                    navigateBook(bookId)
+                } else {
+                    let chapter = Number(ids[2])
+                    if (bookChapterValid(bookId, chapter)) {
+                        navigateChapter(bookId, chapter)
+                    } else {
+                        navigateHome()
+                    }
+                }
             }
-        } else {
-            navigateChapter()
+        }
+    }
+
+    addMarker = function(lat, long, name) {
+        // Check if Marker exists
+        let position = new google.maps.LatLng(lat, long)
+
+        let found = markers.find(function(element) {
+            let pos = element.getPosition()
+            return position.equals(pos)
+        })
+
+        if (!found) {
+            let marker = new google.maps.Marker({
+                position: { lat: lat, lng: long },
+                map: map,
+                title: name,
+                label: {
+                    fontWeight: "bold",
+                    text: name
+                },
+                animation: google.maps.Animation.DROP
+            })
+            markers.push(marker)
+
+            return marker
+        }
+    }
+
+    clearMarkers = function() {
+        markers.forEach(function(marker) {
+            marker.setMap(null)
+        })
+        markers = []
+    }
+
+    setupMarkers = function() {
+        if (window.google === undefined) {
+            //Retry after delay
+            let retry = window.setTimeout(setupMarkers, retryDelay)
+
+            retryDelay += retryDelay
+
+            if (retryDelay > MAX_RETRY_DELAY) {
+                window.clearTimeout(retry)
+                console.log("Loading Failure for google")
+            }
+
+            return
         }
 
-        /*
-         Check the hash to see if it’s empty; if so, navigate to the “home” state
-         Trim the leading “#” and then split the hash based on colons (“:”)
-         If we have one ID, it’s a volume, so navigate to that volume
-             But if the volume ID is < 1 or > 5, it’s invalid, so navigate to “home”
-         If we have two ID’s, it’s a volume and book, so navigate to that book’s list of chapters
-             But if the volume or book ID is invalid, navigate “home”
-             If the book doesn’t have chapters, navigate to its content directly
-         If we have three ID’s, its volume, book, chapter, so navigate there if valid
-             If invalid, navigate “home”
-         */
+        if (markers.length > 0) {
+            //Clear Existing ones
+            clearMarkers()
+        }
+
+        let bounds = new google.maps.LatLngBounds()
+
+        document
+            .querySelectorAll('a[onclick^="showLocation("]')
+            .forEach(function(element) {
+                let val = element.getAttribute("onclick")
+                let matches = LAT_LON_PARSER.exec(val)
+
+                if (matches) {
+                    let placename = matches[index.placename]
+                    let lat = parseFloat(matches[index.lat])
+                    let long = parseFloat(matches[index.long])
+                    let flag = matches[index.flag]
+
+                    if (flag !== "") {
+                        placename += " " + flag
+                    }
+
+                    let marker = addMarker(lat, long, placename)
+                    if (marker) {
+                        bounds.extend(marker.getPosition())
+                    }
+                }
+            })
+
+        // Zoom to the bounds
+
+        map.fitBounds(bounds)
     }
 
     /*------------------------------------------------------------------------
